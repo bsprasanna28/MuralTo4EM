@@ -82,8 +82,8 @@ COLOR_SHAPE_TO_CLASS = {
     ("#D4D4D4FF", "circle"): "Attribute",
     ("#459C5BFF", "circle"): "KPI (Concepts)",   # KPI can live in EITHER Goal Model or Concepts Model in real 4EM - see REAL_CLASS_NAME below
     # --- Technical Components and Requirements Model ---
-    ("#9E9E9EFF", "rectangle"): "IS Technical Component",
-    ("#9E9E9EFF", "circle"): "IS Requirement",
+    ("#D8C7FFFF", "circle"): "IS Technical Component",
+    ("#9EDCFAFF", "circle"): "IS Requirement",
     # --- Product-Service-Model ---
     ("#A1887FFF", "rectangle"): "Component",
     ("#A1887FFF", "circle"): "Unspecific/Product/Service",
@@ -194,15 +194,37 @@ CONNECTOR_COLOR_OVERRIDE = {
     "#E53E3EFF": "Contradicts",
 }
 
-# Every relation type value we've confirmed is valid somewhere in 4EM (drawn
-# from RELATION_RULES + RELATION_RULES_CROSS_MODEL). Used to validate arrow
-# text labels from Mural: if a label matches one of these (case-insensitive),
-# we trust it and use the label's relation type directly instead of the
-# class-pair default - this lets you override the guessed relation type per
-# arrow just by typing the real one onto it in Mural. Unrecognized label text
-# falls back to the normal class-pair lookup (and gets logged) rather than
-# being trusted blindly, since a typo could otherwise silently write an
-# invalid ENUMERATION value into the XML.
+# Extra confirmed-valid relation types per class pair, alongside the single
+# default each pair already has in RELATION_RULES / RELATION_RULES_CROSS_MODEL
+# (e.g. Goal-Goal can be Supports OR Contradicts OR Hinders; IS Technical
+# Component <-> IS Technical Component can be "supports" OR "hinders" -
+# NOTE the different casing convention from Goal Model's "Hinders"!). Keyed
+# by (cross_model, src_cls, tgt_cls) so casing stays scoped to the pair that
+# actually uses it - a global set previously caused "hinders" (TCRM,
+# lowercase) to incorrectly resolve to "Hinders" (Goal Model, capitalized)
+# since both are valid SOMEWHERE but not interchangeable.
+EXTRA_RELATION_TYPES_BY_PAIR = {
+    (False, "Goal", "Goal"): ("Contradicts",),
+    (False, "Concept", "Concept"): ("1:1", "n:m"),
+    (False, "IS Technical Component", "IS Technical Component"): ("hinders",),
+}
+
+
+def known_types_for_pair(cross_model, src_cls, tgt_cls):
+    """Set of valid relation-type strings (real casing) for this exact pair,
+    including the table default plus any registered extras."""
+    table = RELATION_RULES_CROSS_MODEL if cross_model else RELATION_RULES
+    types = set()
+    default = table.get((src_cls, tgt_cls))
+    if default:
+        types.add(default)
+    types.update(EXTRA_RELATION_TYPES_BY_PAIR.get((cross_model, src_cls, tgt_cls), ()))
+    return types
+
+
+# Fallback global set (used only when a label doesn't match anything scoped
+# to the specific pair - keeps some flexibility for genuinely cross-cutting
+# labels without letting them override a pair's own confirmed casing).
 KNOWN_RELATION_TYPES_EXACT = set()
 KNOWN_RELATION_TYPES_CI = {}
 for _table in (RELATION_RULES, RELATION_RULES_CROSS_MODEL):
@@ -210,13 +232,10 @@ for _table in (RELATION_RULES, RELATION_RULES_CROSS_MODEL):
         if _v:
             KNOWN_RELATION_TYPES_EXACT.add(_v)
             KNOWN_RELATION_TYPES_CI.setdefault(_v.lower(), _v)
-# Confirmed-valid types that exist alongside a pair's single stored default
-# (e.g. Goal-Goal can be Supports OR Contradicts OR Hinders - only one can
-# live in RELATION_RULES, so extras are registered here to be recognized
-# as valid arrow labels too).
-for _v in ("Contradicts", "1:1", "n:m"):
-    KNOWN_RELATION_TYPES_EXACT.add(_v)
-    KNOWN_RELATION_TYPES_CI.setdefault(_v.lower(), _v)
+for _pair_extras in EXTRA_RELATION_TYPES_BY_PAIR.values():
+    for _v in _pair_extras:
+        KNOWN_RELATION_TYPES_EXACT.add(_v)
+        KNOWN_RELATION_TYPES_CI.setdefault(_v.lower(), _v)
 
 PX_TO_CM = 4.0 / 168.0
 
@@ -391,7 +410,7 @@ INSTANCE_ATTR_TEMPLATES = {
     "IS Requirement": """<ATTRIBUTE name="Position" type="STRING">{position}</ATTRIBUTE>
 <ATTRIBUTE name="External tool coupling" type="STRING"></ATTRIBUTE>
 <ATTRIBUTE name="Description" type="LONGSTRING">{desc}</ATTRIBUTE>
-<ATTRIBUTE name="Type" type="ENUMERATION"></ATTRIBUTE>
+<ATTRIBUTE name="Type" type="ENUMERATION">Functional</ATTRIBUTE>
 {intermodel_relations}
 <INTERREF name="Decomposition"></INTERREF>
 <RECORD name="Attributes"></RECORD>""",
@@ -535,15 +554,24 @@ def build_registry(widgets):
 
 
 def infer_relation_type(src_cls, tgt_cls, stroke_color, cross_model, label_text=None):
-    # Priority: explicit Mural arrow label (if it's a KNOWN valid relation
-    # type) > stroke-color override > class-pair default.
+    # Priority: explicit Mural arrow label, checked in order:
+    #   1. exact-case match against types known for THIS specific class pair
+    #   2. case-insensitive match against types known for THIS pair
+    #   3. exact-case match against the global set (cross-pair fallback)
+    #   4. case-insensitive match against the global set
+    # then stroke-color override > class-pair default.
     # Returns (rel_type, label_used_as_type). When a label exists but isn't
-    # a recognized Type value, label_used_as_type is False - confirmed by
-    # real data (Organizational Unit "part of" relation) that such labels
-    # are meant to go in the connector's Description field instead, not be
-    # discarded. Caller decides what to do with an unused label.
+    # recognized, label_used_as_type is False - confirmed by real data
+    # (Organizational Unit "part of" relation) that such labels are meant to
+    # go in the connector's Description field instead of being discarded.
     if label_text:
         stripped = label_text.strip()
+        pair_types = known_types_for_pair(cross_model, src_cls, tgt_cls)
+        if stripped in pair_types:
+            return stripped, True
+        pair_ci = {t.lower(): t for t in pair_types}
+        if stripped.lower() in pair_ci:
+            return pair_ci[stripped.lower()], True
         if stripped in KNOWN_RELATION_TYPES_EXACT:
             return stripped, True  # exact-case match - trust as typed
         known_ci = KNOWN_RELATION_TYPES_CI.get(stripped.lower())
@@ -758,8 +786,145 @@ def convert(mural_json_path, output_xml_path):
           f"{len(cross_model_arrows)} cross-model relation(s)")
 
 
+def validate_board(mural_json_path):
+    """
+    Pre-flight check: scans a Mural export and reports classification and
+    structural issues WITHOUT generating any XML. Meant to be run before a
+    real conversion attempt, so problems are caught here instead of as a
+    failed/wrong ADOxx import discovered later.
+
+    Reports:
+      - (color, shape) combos present on the board that aren't in
+        COLOR_SHAPE_TO_CLASS, grouped and counted (not one line per sticky)
+      - dangling arrows (missing startRefId/endRefId, or pointing at an
+        unclassified/nonexistent widget)
+      - arrow labels that don't match ANY known relation type anywhere
+        (checked globally here, since submodel-pair context isn't resolved
+        until classification succeeds - a soft warning, not necessarily
+        wrong, since unmatched labels are still valid as Description text)
+    """
+    widgets = load_widgets(mural_json_path)
+    all_ids = {w["id"] for w in widgets if w.get("type") == "sticky note"}
+
+    print(f"=== Pre-flight validation: {mural_json_path} ===\n")
+
+    # 1. Unclassified (color, shape) combinations, grouped
+    unclassified = {}
+    classified_count = 0
+    for w in widgets:
+        if w.get("type") != "sticky note":
+            continue
+        color = w.get("style", {}).get("backgroundColor")
+        shape = w.get("shape")
+        if (color, shape) in COLOR_SHAPE_TO_CLASS:
+            classified_count += 1
+            continue
+        key = (color, shape)
+        example = strip_html(w.get("htmlText", "")) or "(no text)"
+        unclassified.setdefault(key, []).append(example)
+
+    print(f"Stickies classified OK: {classified_count}")
+    if unclassified:
+        print(f"Stickies with UNRECOGNIZED (color, shape): {sum(len(v) for v in unclassified.values())}")
+        for (color, shape), examples in sorted(unclassified.items(), key=lambda x: -len(x[1])):
+            print(f"  {color!r:12} + {shape!r:10} x{len(examples):<3} e.g. {examples[0]!r}")
+        print("  -> Fix: either recolor these stickies to a color/shape already in")
+        print("     COLOR_SHAPE_TO_CLASS, or add a new entry for the class they represent.")
+    else:
+        print("All stickies have a recognized (color, shape).")
+
+    # 2. Dangling / broken arrows
+    print()
+    dangling = []
+    for w in widgets:
+        if w.get("type") != "arrow":
+            continue
+        src_id, tgt_id = w.get("startRefId"), w.get("endRefId")
+        label = extract_arrow_label(w)
+        if not src_id or not tgt_id:
+            dangling.append((w["id"], src_id, tgt_id, label, "missing endpoint"))
+        elif src_id not in all_ids or tgt_id not in all_ids:
+            dangling.append((w["id"], src_id, tgt_id, label, "endpoint not a sticky note"))
+    if dangling:
+        print(f"DANGLING arrows: {len(dangling)}")
+        for wid, s, e, label, reason in dangling:
+            print(f"  arrow {wid} ({reason}) label={label!r} start={s} end={e}")
+        print("  -> Fix: reconnect these arrows to real stickies in Mural before exporting.")
+    else:
+        print("No dangling arrows.")
+
+    # 3. Arrow labels that don't match any known relation type at all
+    print()
+    unrecognized_labels = []
+    for w in widgets:
+        if w.get("type") != "arrow":
+            continue
+        label = extract_arrow_label(w)
+        if label and label.strip() not in KNOWN_RELATION_TYPES_EXACT \
+                and label.strip().lower() not in KNOWN_RELATION_TYPES_CI:
+            unrecognized_labels.append((w["id"], label))
+    if unrecognized_labels:
+        print(f"Arrow labels not matching any known relation type: {len(unrecognized_labels)}")
+        for wid, label in unrecognized_labels:
+            print(f"  arrow {wid}: {label!r}")
+        print("  -> Not necessarily wrong - unmatched labels become the connector's")
+        print("     Description instead of Type. Just confirm that's what you intended.")
+    else:
+        print("All arrow labels either match a known relation type or have no label.")
+
+    print(f"\n=== End validation ===")
+
+
+def check_palette_integrity():
+    """
+    Developer-time self-check: re-parses THIS FILE's own source to detect
+    duplicate (color, shape) keys in COLOR_SHAPE_TO_CLASS or duplicate class
+    keys in INSTANCE_ATTR_TEMPLATES. Python dict literals silently keep only
+    the LAST duplicate entry with no error - this caught real bugs during
+    development (a duplicate "Process" template silently discarded an
+    earlier one). Run this after editing either table.
+    """
+    import re as _re
+    source = Path(__file__).read_text(encoding="utf-8")
+
+    def _find_duplicates(block_start_marker, block_end_marker, key_pattern):
+        start = source.index(block_start_marker)
+        end = source.index(block_end_marker, start)
+        block = source[start:end]
+        keys = _re.findall(key_pattern, block, _re.M)
+        seen, dupes = set(), []
+        for k in keys:
+            if k in seen:
+                dupes.append(k)
+            seen.add(k)
+        return dupes
+
+    color_shape_dupes = _find_duplicates(
+        "COLOR_SHAPE_TO_CLASS = {", "\n}\n",
+        r'\(\"#[0-9A-Fa-f]{8}\", \"\w+\"\)'
+    )
+    template_dupes = _find_duplicates(
+        "INSTANCE_ATTR_TEMPLATES = {", "\n}\n",
+        r'^    \"([^\"]+)\":'
+    )
+    if color_shape_dupes:
+        print(f"[INTEGRITY] Duplicate (color, shape) keys in COLOR_SHAPE_TO_CLASS: {color_shape_dupes}")
+    if template_dupes:
+        print(f"[INTEGRITY] Duplicate class keys in INSTANCE_ATTR_TEMPLATES: {template_dupes}")
+    if not color_shape_dupes and not template_dupes:
+        print("[INTEGRITY] No duplicate keys found in COLOR_SHAPE_TO_CLASS or INSTANCE_ATTR_TEMPLATES.")
+
+
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print("Usage: python mural_to_4em.py <mural_export.json> <output.xml>")
+    if len(sys.argv) == 2 and sys.argv[1] == "--check-integrity":
+        check_palette_integrity()
+    elif len(sys.argv) == 3 and sys.argv[2] == "--validate":
+        validate_board(sys.argv[1])
+    elif len(sys.argv) == 3:
+        convert(sys.argv[1], sys.argv[2])
+    else:
+        print("Usage:")
+        print("  python mural_to_4em.py <mural_export.json> <output.xml>       # convert")
+        print("  python mural_to_4em.py <mural_export.json> --validate         # pre-flight check only")
+        print("  python mural_to_4em.py --check-integrity                      # dev-time table self-check")
         sys.exit(1)
-    convert(sys.argv[1], sys.argv[2])

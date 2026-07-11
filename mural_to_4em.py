@@ -59,17 +59,17 @@ from pathlib import Path
 # #86E6D9FF (Process) and #9EDCFAFF (Information Set) were both confirmed
 # from actual Mural exports, so kept as-is to avoid relearning them.
 COLOR_SHAPE_TO_CLASS = {
-    # --- Goal Model ---
-    ("#FCF281FF", "rectangle"): "Goal",
-    ("#FCF281FF", "circle"): "KPI",
-    ("#F44336FF", "rectangle"): "Problem",
-    ("#F44336FF", "circle"): "Cause",
-    ("#9C27B0FF", "rectangle"): "Constraint",
-    ("#9C27B0FF", "circle"): "Opportunity",
+    # --- Goal Model --- (colors below match the real board, not invented)
+    ("#AAED92FF", "rectangle"): "Goal",
+    ("#AAED92FF", "circle"): "KPI",
+    ("#F6A324FF", "rectangle"): "Problem",
+    ("#9EDCFAFF", "rectangle"): "Cause",
+    ("#FFFFFFFF", "rectangle"): "Constraint",
+    ("#459C5BFF", "rectangle"): "Opportunity",
     # --- Business Process Model ---
     ("#86E6D9FF", "rectangle"): "Process",           # confirmed from real board
     ("#86E6D9FF", "circle"): "External Process",
-    ("#9EDCFAFF", "rectangle"): "Information Set",   # confirmed from real board
+    ("#00BCD4FF", "rectangle"): "Information Set",   # moved off #9EDCFAFF - that now belongs to Cause (confirmed from real board)
     ("#B0BEC5FF", "rectangle"): "Split (AND)",
     ("#B0BEC5FF", "circle"): "Join (AND)",
     # --- Actors and Resources Model ---
@@ -182,6 +182,30 @@ CONNECTOR_COLOR_OVERRIDE = {
     "#E53E3EFF": "Contradicts",
 }
 
+# Every relation type value we've confirmed is valid somewhere in 4EM (drawn
+# from RELATION_RULES + RELATION_RULES_CROSS_MODEL). Used to validate arrow
+# text labels from Mural: if a label matches one of these (case-insensitive),
+# we trust it and use the label's relation type directly instead of the
+# class-pair default - this lets you override the guessed relation type per
+# arrow just by typing the real one onto it in Mural. Unrecognized label text
+# falls back to the normal class-pair lookup (and gets logged) rather than
+# being trusted blindly, since a typo could otherwise silently write an
+# invalid ENUMERATION value into the XML.
+KNOWN_RELATION_TYPES_EXACT = set()
+KNOWN_RELATION_TYPES_CI = {}
+for _table in (RELATION_RULES, RELATION_RULES_CROSS_MODEL):
+    for _v in _table.values():
+        if _v:
+            KNOWN_RELATION_TYPES_EXACT.add(_v)
+            KNOWN_RELATION_TYPES_CI.setdefault(_v.lower(), _v)
+# Confirmed-valid types that exist alongside a pair's single stored default
+# (e.g. Goal-Goal can be Supports OR Contradicts OR Hinders - only one can
+# live in RELATION_RULES, so extras are registered here to be recognized
+# as valid arrow labels too).
+for _v in ("Contradicts",):
+    KNOWN_RELATION_TYPES_EXACT.add(_v)
+    KNOWN_RELATION_TYPES_CI.setdefault(_v.lower(), _v)
+
 PX_TO_CM = 4.0 / 168.0
 
 INSTANCE_ATTR_TEMPLATES = {
@@ -257,9 +281,12 @@ INSTANCE_ATTR_TEMPLATES = {
 <INTERREF name="Decomposition"></INTERREF>
 <RECORD name="Attributes"></RECORD>
 <ATTRIBUTE name="Defined by" type="LONGSTRING"></ATTRIBUTE>""",
-    # KPI: "Target Value"/"Designation" type inferred as STRING (unverified -
-    # could be DOUBLE for Target Value); "KPI Log" inferred as an empty RECORD
-    # (looks like a log table, same pattern as "Attributes").
+    # KPI: attribute types now CONFIRMED from a real ADOxx export
+    # (Goal_Model_4em_Export.xml) - "KPI Log" is a plain LONGSTRING attribute,
+    # NOT a RECORD as originally guessed (that guess caused a real
+    # WRONG_ATTRIBUTE_TYPE import error - ADOxx tried to parse it as a
+    # table/record when it should be simple text). "Designation" is
+    # LONGSTRING, not STRING as originally guessed.
     "KPI": """<ATTRIBUTE name="Position" type="STRING">{position}</ATTRIBUTE>
 <ATTRIBUTE name="External tool coupling" type="STRING"></ATTRIBUTE>
 <ATTRIBUTE name="Description" type="LONGSTRING">{desc}</ATTRIBUTE>
@@ -268,8 +295,8 @@ INSTANCE_ATTR_TEMPLATES = {
 <ATTRIBUTE name="Defined by" type="LONGSTRING"></ATTRIBUTE>
 <RECORD name="Attributes"></RECORD>
 <ATTRIBUTE name="Target Value" type="STRING"></ATTRIBUTE>
-<RECORD name="KPI Log"></RECORD>
-<ATTRIBUTE name="Designation" type="STRING"></ATTRIBUTE>""",
+<ATTRIBUTE name="KPI Log" type="LONGSTRING"></ATTRIBUTE>
+<ATTRIBUTE name="Designation" type="LONGSTRING"></ATTRIBUTE>""",
     # Rule: "Type" is ENUMERATION in real data (e.g. "Derivation Rule") -
     # exact full list of valid enum values NOT verified, "Derivation Rule"
     # confirmed as one legal value. "Formal description in advanced language"
@@ -465,11 +492,34 @@ def build_registry(widgets):
     return registry
 
 
-def infer_relation_type(src_cls, tgt_cls, stroke_color, cross_model):
+def infer_relation_type(src_cls, tgt_cls, stroke_color, cross_model, label_text=None):
+    # Priority: explicit Mural arrow label (if it's a KNOWN valid relation
+    # type) > stroke-color override > class-pair default.
+    if label_text:
+        stripped = label_text.strip()
+        if stripped in KNOWN_RELATION_TYPES_EXACT:
+            return stripped  # exact-case match - trust as typed
+        known_ci = KNOWN_RELATION_TYPES_CI.get(stripped.lower())
+        if known_ci:
+            return known_ci  # best-effort casing from a different context
+        print(f"  [note] arrow label {label_text!r} is not a recognized "
+              f"relation type - falling back to default for "
+              f"({src_cls} -> {tgt_cls})", file=sys.stderr)
     if stroke_color in CONNECTOR_COLOR_OVERRIDE:
         return CONNECTOR_COLOR_OVERRIDE[stroke_color]
     table = RELATION_RULES_CROSS_MODEL if cross_model else RELATION_RULES
     return table.get((src_cls, tgt_cls), "Relation")
+
+
+def extract_arrow_label(widget):
+    label = widget.get("label")
+    if not label:
+        return None
+    labels = label.get("labels") or []
+    if not labels:
+        return None
+    text = (labels[0].get("text") or "").strip()
+    return text or None
 
 
 def collect_arrows(widgets, registry):
@@ -485,7 +535,8 @@ def collect_arrows(widgets, registry):
             continue
         src, tgt = registry[src_id], registry[tgt_id]
         stroke = w.get("style", {}).get("strokeColor")
-        entry = {"src": src, "tgt": tgt, "stroke": stroke}
+        label_text = extract_arrow_label(w)
+        entry = {"src": src, "tgt": tgt, "stroke": stroke, "label_text": label_text}
         if src["modeltype"] == tgt["modeltype"]:
             same.append(entry)
         else:
@@ -512,7 +563,7 @@ def build_intermodel_relations_by_source(cross_arrows):
         mural_start = entry["src"]   # Mural startRefId widget -> IREF target
         mural_end = entry["tgt"]     # Mural endRefId widget   -> record holder
         holder, pointed_at = mural_end, mural_start
-        rel_type = infer_relation_type(holder["cls"], pointed_at["cls"], entry["stroke"], cross_model=True)
+        rel_type = infer_relation_type(holder["cls"], pointed_at["cls"], entry["stroke"], cross_model=True, label_text=entry.get("label_text"))
         row_xml = (
             f'<ROW id="row.{row_counter}" number="1">\n'
             f'<ATTRIBUTE name="Type" type="ENUMERATION">{rel_type}</ATTRIBUTE>\n'
@@ -564,7 +615,7 @@ def build_connectors_xml(same_model_arrows, start_index, con_counter):
         # as FROM/TO below (FROM=tgt, TO=src), not the raw Mural src/tgt -
         # otherwise the relation label (e.g. "Output" vs "Input") ends up
         # describing the opposite direction from the one actually stored.
-        rel_type = infer_relation_type(tgt["cls"], src["cls"], entry["stroke"], cross_model=False)
+        rel_type = infer_relation_type(tgt["cls"], src["cls"], entry["stroke"], cross_model=False, label_text=entry.get("label_text"))
         con_id = f"con.{con_counter}"
         # Empirically-confirmed swap: Mural start/end come out reversed vs 4EM FROM/TO.
         connectors_xml.append(

@@ -67,19 +67,20 @@ COLOR_SHAPE_TO_CLASS = {
     ("#FFFFFFFF", "rectangle"): "Constraint",
     ("#459C5BFF", "rectangle"): "Opportunity",
     # --- Business Process Model ---
-    ("#86E6D9FF", "rectangle"): "Process",           # confirmed from real board
-    ("#86E6D9FF", "circle"): "External Process",
-    ("#00BCD4FF", "rectangle"): "Information Set",   # moved off #9EDCFAFF - that now belongs to Cause (confirmed from real board)
-    ("#B0BEC5FF", "rectangle"): "Split (AND)",
-    ("#B0BEC5FF", "circle"): "Join (AND)",
+    ("#FFFFFFFF", "circle"): "Process",                # UPDATED - was #86E6D9FF/rectangle in an earlier, simpler test board
+    ("#EDEDEDFF", "rectangle"): "External Process",     # UPDATED - was #86E6D9FF/circle
+    ("#FBF9E5FF", "rectangle"): "Information Set",     # actual real color that landed after 3 attempts - Mural's picker kept landing near-neighbors of already-taken colors
+    ("#EDEDEDFF", "circle"): "Split (AND)",
+    ("#F7F7F7FF", "circle"): "Join (AND)",
     # --- Actors and Resources Model ---
     ("#FEBBBEFF", "rectangle"): "Individual",
     ("#9E7EE6FF", "rectangle"): "Role",
     ("#D4D4D4FF", "rectangle"): "Resource",
     ("#F7F7F7FF", "rectangle"): "Organizational Unit",
     # --- Concepts Model ---
-    ("#E91E63FF", "rectangle"): "Concept",
-    ("#E91E63FF", "circle"): "Attribute",
+    ("#E6C003FF", "circle"): "Concept",
+    ("#D4D4D4FF", "circle"): "Attribute",
+    ("#459C5BFF", "circle"): "KPI (Concepts)",   # KPI can live in EITHER Goal Model or Concepts Model in real 4EM - see REAL_CLASS_NAME below
     # --- Technical Components and Requirements Model ---
     ("#9E9E9EFF", "rectangle"): "IS Technical Component",
     ("#9E9E9EFF", "circle"): "IS Requirement",
@@ -89,7 +90,7 @@ COLOR_SHAPE_TO_CLASS = {
     ("#FFE082FF", "rectangle"): "Feature",
     ("#FFE082FF", "circle"): "PartOF (AND)",
     # --- Business Rule Model ---
-    ("#FF9800FF", "rectangle"): "Rule",
+    ("#B3B3B3FF", "rectangle"): "Rule",
 }
 
 # Which 4EM submodel each class belongs to: (modeltype string, libtype)
@@ -99,11 +100,16 @@ CLASS_TO_MODEL = {
     "Constraint": ("Goal Model", "bp"),
     "Cause": ("Goal Model", "bp"),
     "Opportunity": ("Goal Model", "bp"),
-    # KPI's authoritative submodel is AMBIGUOUS in the reference file - one
-    # instance was found declared inside the Goal Model section, another
-    # inside Concepts Model. Defaulting to Goal Model (matches "measures a
-    # Goal" semantics) - verify against your own ADOxx install if it matters.
+    # KPI genuinely lives in EITHER Goal Model or Concepts Model in real 4EM
+    # (confirmed: instances found declared in both sections of the reference
+    # file). Since one internal class name can only map to one submodel here,
+    # two Mural colors are used to disambiguate which one a given KPI sticky
+    # targets: plain "KPI" (paired with Goal's green, circle shape) means
+    # Goal Model; "KPI (Concepts)" is a separate internal key for the
+    # Concepts Model version, mapped back to the real class name "KPI" when
+    # writing XML - see REAL_CLASS_NAME below.
     "KPI": ("Goal Model", "bp"),
+    "KPI (Concepts)": ("Concepts Model", "bp"),
     "Rule": ("Business Rule Model", "bp"),  # NOTE: singular "Rule", confirmed from real export (was wrongly "Business Rules Model" before)
     "Concept": ("Concepts Model", "bp"),
     "Attribute": ("Concepts Model", "bp"),
@@ -178,6 +184,10 @@ RELATION_RULES_CROSS_MODEL = {
     ("Rule", "Process"): "supports",
     ("Organizational Unit", "IS Technical Component"): "defines",   # confirmed
     ("Role", "Process"): "performs",                                # confirmed
+    ("Process", "IS Technical Component"): "requires",              # confirmed
+    ("Process", "IS Requirement"): "motivates",                     # confirmed
+    ("Process", "Concept"): "uses",                                 # confirmed
+    ("External Process", "Concept"): "creates",                     # confirmed
 }
 
 CONNECTOR_COLOR_OVERRIDE = {
@@ -204,7 +214,7 @@ for _table in (RELATION_RULES, RELATION_RULES_CROSS_MODEL):
 # (e.g. Goal-Goal can be Supports OR Contradicts OR Hinders - only one can
 # live in RELATION_RULES, so extras are registered here to be recognized
 # as valid arrow labels too).
-for _v in ("Contradicts",):
+for _v in ("Contradicts", "1:1", "n:m"):
     KNOWN_RELATION_TYPES_EXACT.add(_v)
     KNOWN_RELATION_TYPES_CI.setdefault(_v.lower(), _v)
 
@@ -321,13 +331,16 @@ INSTANCE_ATTR_TEMPLATES = {
 {intermodel_relations}""",
     # Attribute (the CLASS, e.g. "Email Address") - not to be confused with
     # the generic <ATTRIBUTE> XML tag used everywhere else in this file.
+    # "Data Type" CONFIRMED as ENUMERATION (was wrongly STRING) - "String" is
+    # a confirmed valid value, used as default rather than leaving blank
+    # since blank ENUMERATION values are a known source of import errors.
     "Attribute": """<ATTRIBUTE name="Position" type="STRING">{position}</ATTRIBUTE>
 <ATTRIBUTE name="External tool coupling" type="STRING"></ATTRIBUTE>
 <ATTRIBUTE name="Description" type="LONGSTRING">{desc}</ATTRIBUTE>
 {intermodel_relations}
 <INTERREF name="Decomposition"></INTERREF>
 <RECORD name="Attributes"></RECORD>
-<ATTRIBUTE name="Data Type" type="STRING"></ATTRIBUTE>
+<ATTRIBUTE name="Data Type" type="ENUMERATION">String</ATTRIBUTE>
 <ATTRIBUTE name="Value Range" type="STRING"></ATTRIBUTE>""",
     # External Process: confirmed identical attribute set to Process.
     "External Process": """<ATTRIBUTE name="Position" type="STRING">{position}</ATTRIBUTE>
@@ -413,6 +426,24 @@ INSTANCE_ATTR_TEMPLATES = {
     "PartOF (AND)": """<ATTRIBUTE name="Position" type="STRING">{position}</ATTRIBUTE>
 <ATTRIBUTE name="External tool coupling" type="STRING"></ATTRIBUTE>""",
 }
+# KPI (Concepts) uses the identical real 4EM attribute structure as KPI -
+# same class, just routed to a different submodel file. See CLASS_TO_MODEL.
+INSTANCE_ATTR_TEMPLATES["KPI (Concepts)"] = INSTANCE_ATTR_TEMPLATES["KPI"]
+
+# Maps an internal disambiguation key back to the REAL 4EM class name that
+# must be written into the XML (class="...", relation FROM/TO, IREF
+# tclassname). Only needed for classes like KPI that have more than one
+# internal key because they can live in more than one submodel - everything
+# else maps to itself.
+REAL_CLASS_NAME = {
+    "KPI (Concepts)": "KPI",
+}
+
+
+def real_class(cls):
+    return REAL_CLASS_NAME.get(cls, cls)
+
+
 # NOTE: Goal, Problem, Individual, Role, Process, Information Set are all
 # verified against real exports. For every other class, repeat the
 # manual-export trick before trusting it.
@@ -492,6 +523,7 @@ def build_registry(widgets):
             "name": name,
             "description": description,
             "cls": cls,
+            "real_cls": real_class(cls),
             "modeltype": modeltype,
             "libtype": libtype,
             "x": px_to_cm(w["x"]),
@@ -579,14 +611,14 @@ def build_intermodel_relations_by_source(cross_arrows):
         mural_start = entry["src"]   # Mural startRefId widget -> IREF target
         mural_end = entry["tgt"]     # Mural endRefId widget   -> record holder
         holder, pointed_at = mural_end, mural_start
-        rel_type, _ = infer_relation_type(holder["cls"], pointed_at["cls"], entry["stroke"], cross_model=True, label_text=entry.get("label_text"))
+        rel_type, _ = infer_relation_type(holder["real_cls"], pointed_at["real_cls"], entry["stroke"], cross_model=True, label_text=entry.get("label_text"))
         row_xml = (
             f'<ROW id="row.{row_counter}" number="1">\n'
             f'<ATTRIBUTE name="Type" type="ENUMERATION">{rel_type}</ATTRIBUTE>\n'
             f'<INTERREF name="interref">\n'
             f'<IREF type="objectreference" tmodeltype="{pointed_at["modeltype"]}" '
             f'tmodelname="{pointed_at["modeltype"]}" tmodelver="" '
-            f'tclassname="{pointed_at["cls"]}" tobjname="{pointed_at["name"]}"></IREF>\n'
+            f'tclassname="{pointed_at["real_cls"]}" tobjname="{pointed_at["name"]}"></IREF>\n'
             f'</INTERREF>\n'
             f'</ROW>'
         )
@@ -615,7 +647,7 @@ def build_instances_for_submodel(items, intermodel_by_name, obj_counter, start_i
         body = template.format(position=position, desc=info["description"], intermodel_relations=intermodel_xml)
         obj_id = f"obj.{obj_counter}"
         instances_xml.append(
-            f'<INSTANCE id="{obj_id}" class="{cls}" name="{info["name"]}">\n{body}\n</INSTANCE>'
+            f'<INSTANCE id="{obj_id}" class="{info["real_cls"]}" name="{info["name"]}">\n{body}\n</INSTANCE>'
         )
         obj_counter += 1
         index += 1
@@ -632,7 +664,7 @@ def build_connectors_xml(same_model_arrows, start_index, con_counter):
         # otherwise the relation label (e.g. "Output" vs "Input") ends up
         # describing the opposite direction from the one actually stored.
         rel_type, label_used_as_type = infer_relation_type(
-            tgt["cls"], src["cls"], entry["stroke"], cross_model=False, label_text=entry.get("label_text")
+            tgt["real_cls"], src["real_cls"], entry["stroke"], cross_model=False, label_text=entry.get("label_text")
         )
         # If the arrow had a label but it wasn't a recognized Type value,
         # put it in Description instead of discarding it - confirmed by a
@@ -646,8 +678,8 @@ def build_connectors_xml(same_model_arrows, start_index, con_counter):
         # Empirically-confirmed swap: Mural start/end come out reversed vs 4EM FROM/TO.
         connectors_xml.append(
             f'<CONNECTOR id="{con_id}" class="4EM_Relation">\n'
-            f'<FROM instance="{tgt["name"]}" class="{tgt["cls"]}"></FROM>\n'
-            f'<TO instance="{src["name"]}" class="{src["cls"]}"></TO>\n'
+            f'<FROM instance="{tgt["name"]}" class="{tgt["real_cls"]}"></FROM>\n'
+            f'<TO instance="{src["name"]}" class="{src["real_cls"]}"></TO>\n'
             f'<ATTRIBUTE name="Positions" type="STRING">EDGE 0 index:{index}</ATTRIBUTE>\n'
             f'<ATTRIBUTE name="Type" type="ENUMERATION">{rel_type}</ATTRIBUTE>\n'
             f'<ATTRIBUTE name="Description" type="LONGSTRING">{description}</ATTRIBUTE>\n'

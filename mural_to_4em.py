@@ -392,6 +392,31 @@ def strip_html(html_text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def parse_name_and_description(html_text: str):
+    """
+    Convention: first line of a sticky's text = Name, any further line(s) =
+    Description. Mural stores each line as its own <div> in htmlText, e.g.
+    '<html><div><span>Goal 1</span></div><div><span>Increase Q4 revenue via
+    new channels</span></div></html>'. A sticky with only one line gets an
+    empty description (caller should fall back to using the name).
+    """
+    if not html_text:
+        return "", ""
+    lines = re.findall(r"<div[^>]*>(.*?)</div>", html_text, re.S)
+    cleaned = []
+    for line in lines:
+        t = re.sub(r"<[^>]+>", " ", line)
+        t = unescape(t)
+        t = re.sub(r"\s+", " ", t).strip()
+        if t:
+            cleaned.append(t)
+    if not cleaned:
+        return "", ""
+    name = cleaned[0]
+    description = " ".join(cleaned[1:])
+    return name, description
+
+
 def px_to_cm(px: float) -> float:
     return round(px * PX_TO_CM, 2)
 
@@ -408,7 +433,7 @@ def classify_sticky(widget):
 
 
 def build_registry(widgets):
-    """mural widget id -> {name, cls, submodel, x, y, w, h}"""
+    """mural widget id -> {name, description, cls, submodel, x, y, w, h}"""
     registry = {}
     for w in widgets:
         if w.get("type") != "sticky note":
@@ -421,9 +446,14 @@ def build_registry(widgets):
                   f"text={strip_html(w.get('htmlText', ''))!r}", file=sys.stderr)
             continue
         modeltype, libtype = CLASS_TO_MODEL.get(cls, ("Goal Model", "bp"))
-        name = strip_html(w.get("htmlText", "")) or f"{cls} (untitled)"
+        name, description = parse_name_and_description(w.get("htmlText", ""))
+        if not name:
+            name = f"{cls} (untitled)"
+        if not description:
+            description = name  # fallback: single-line stickies keep old behavior
         registry[w["id"]] = {
             "name": name,
+            "description": description,
             "cls": cls,
             "modeltype": modeltype,
             "libtype": libtype,
@@ -515,7 +545,7 @@ def build_instances_for_submodel(items, intermodel_by_name, obj_counter, start_i
             intermodel_xml = f'<RECORD name="Intermodel-Relations">\n{"".join(rows)}\n</RECORD>'
         else:
             intermodel_xml = '<RECORD name="Intermodel-Relations"></RECORD>'
-        body = template.format(position=position, desc=info["name"], intermodel_relations=intermodel_xml)
+        body = template.format(position=position, desc=info["description"], intermodel_relations=intermodel_xml)
         obj_id = f"obj.{obj_counter}"
         instances_xml.append(
             f'<INSTANCE id="{obj_id}" class="{cls}" name="{info["name"]}">\n{body}\n</INSTANCE>'

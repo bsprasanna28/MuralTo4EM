@@ -73,10 +73,10 @@ COLOR_SHAPE_TO_CLASS = {
     ("#B0BEC5FF", "rectangle"): "Split (AND)",
     ("#B0BEC5FF", "circle"): "Join (AND)",
     # --- Actors and Resources Model ---
-    ("#2196F3FF", "rectangle"): "Individual",
-    ("#2196F3FF", "circle"): "Role",
-    ("#5C6BC0FF", "rectangle"): "Resource",
-    ("#5C6BC0FF", "circle"): "Organizational Unit",
+    ("#FEBBBEFF", "rectangle"): "Individual",
+    ("#9E7EE6FF", "rectangle"): "Role",
+    ("#D4D4D4FF", "rectangle"): "Resource",
+    ("#F7F7F7FF", "rectangle"): "Organizational Unit",
     # --- Concepts Model ---
     ("#E91E63FF", "rectangle"): "Concept",
     ("#E91E63FF", "circle"): "Attribute",
@@ -174,8 +174,10 @@ RELATION_RULES = {
 # allowed value before trusting entries you add.
 RELATION_RULES_CROSS_MODEL = {
     ("Individual", "Goal"): "play",
-    ("Role", "Goal"): "play",
+    ("Role", "Goal"): "is responsible for",  # CORRECTED - was wrongly "play", confirmed real value from ARM export
     ("Rule", "Process"): "supports",
+    ("Organizational Unit", "IS Technical Component"): "defines",   # confirmed
+    ("Role", "Process"): "performs",                                # confirmed
 }
 
 CONNECTOR_COLOR_OVERRIDE = {
@@ -344,28 +346,34 @@ INSTANCE_ATTR_TEMPLATES = {
 <ATTRIBUTE name="External tool coupling" type="STRING"></ATTRIBUTE>""",
     "Join (AND)": """<ATTRIBUTE name="Position" type="STRING">{position}</ATTRIBUTE>
 <ATTRIBUTE name="External tool coupling" type="STRING"></ATTRIBUTE>""",
+    # Resource: Location/Quantity types CONFIRMED from real ADOxx export
+    # (ActorsResources_Model_4em_Export.xml) - was wrongly STRING/DOUBLE.
     "Resource": """<ATTRIBUTE name="Position" type="STRING">{position}</ATTRIBUTE>
 <ATTRIBUTE name="External tool coupling" type="STRING"></ATTRIBUTE>
 <ATTRIBUTE name="Description" type="LONGSTRING">{desc}</ATTRIBUTE>
 {intermodel_relations}
 <INTERREF name="Decomposition"></INTERREF>
-<ATTRIBUTE name="Location" type="STRING"></ATTRIBUTE>
-<ATTRIBUTE name="Quantity" type="DOUBLE">0</ATTRIBUTE>
+<ATTRIBUTE name="Location" type="LONGSTRING"></ATTRIBUTE>
+<ATTRIBUTE name="Quantity" type="INTEGER">0</ATTRIBUTE>
 <RECORD name="Attributes"></RECORD>""",
+    # Organizational Unit: Location type CONFIRMED LONGSTRING (was STRING).
     "Organizational Unit": """<ATTRIBUTE name="Position" type="STRING">{position}</ATTRIBUTE>
 <ATTRIBUTE name="External tool coupling" type="STRING"></ATTRIBUTE>
 <ATTRIBUTE name="Description" type="LONGSTRING">{desc}</ATTRIBUTE>
 {intermodel_relations}
 <INTERREF name="Decomposition"></INTERREF>
-<ATTRIBUTE name="Location" type="STRING"></ATTRIBUTE>
+<ATTRIBUTE name="Location" type="LONGSTRING"></ATTRIBUTE>
 <RECORD name="Attributes"></RECORD>""",
+    # IS Technical Component: Location/Quantity fixed BY ANALOGY to Resource
+    # (same attribute names, same likely pattern) - not yet independently
+    # verified against a real Technical Components Model export.
     "IS Technical Component": """<ATTRIBUTE name="Position" type="STRING">{position}</ATTRIBUTE>
 <ATTRIBUTE name="External tool coupling" type="STRING"></ATTRIBUTE>
 <ATTRIBUTE name="Description" type="LONGSTRING">{desc}</ATTRIBUTE>
 {intermodel_relations}
 <INTERREF name="Decomposition"></INTERREF>
-<ATTRIBUTE name="Location" type="STRING"></ATTRIBUTE>
-<ATTRIBUTE name="Quantity" type="DOUBLE">0</ATTRIBUTE>
+<ATTRIBUTE name="Location" type="LONGSTRING"></ATTRIBUTE>
+<ATTRIBUTE name="Quantity" type="INTEGER">0</ATTRIBUTE>
 <RECORD name="Attributes"></RECORD>""",
     "IS Requirement": """<ATTRIBUTE name="Position" type="STRING">{position}</ATTRIBUTE>
 <ATTRIBUTE name="External tool coupling" type="STRING"></ATTRIBUTE>
@@ -374,12 +382,14 @@ INSTANCE_ATTR_TEMPLATES = {
 {intermodel_relations}
 <INTERREF name="Decomposition"></INTERREF>
 <RECORD name="Attributes"></RECORD>""",
+    # Component: Location/Quantity fixed BY ANALOGY to Resource - not yet
+    # independently verified against a real Product-Service-Model export.
     "Component": """<ATTRIBUTE name="Position" type="STRING">{position}</ATTRIBUTE>
 <ATTRIBUTE name="External tool coupling" type="STRING"></ATTRIBUTE>
 <ATTRIBUTE name="Description" type="LONGSTRING">{desc}</ATTRIBUTE>
 <INTERREF name="Decomposition"></INTERREF>
-<ATTRIBUTE name="Quantity" type="DOUBLE">0</ATTRIBUTE>
-<ATTRIBUTE name="Location" type="STRING"></ATTRIBUTE>
+<ATTRIBUTE name="Quantity" type="INTEGER">0</ATTRIBUTE>
+<ATTRIBUTE name="Location" type="LONGSTRING"></ATTRIBUTE>
 {intermodel_relations}""",
     # Unspecific/Product/Service: "Attribute" field here is a RECORD (list of
     # linked Attribute-class instances), distinct from the "Attribute" class
@@ -495,20 +505,26 @@ def build_registry(widgets):
 def infer_relation_type(src_cls, tgt_cls, stroke_color, cross_model, label_text=None):
     # Priority: explicit Mural arrow label (if it's a KNOWN valid relation
     # type) > stroke-color override > class-pair default.
+    # Returns (rel_type, label_used_as_type). When a label exists but isn't
+    # a recognized Type value, label_used_as_type is False - confirmed by
+    # real data (Organizational Unit "part of" relation) that such labels
+    # are meant to go in the connector's Description field instead, not be
+    # discarded. Caller decides what to do with an unused label.
     if label_text:
         stripped = label_text.strip()
         if stripped in KNOWN_RELATION_TYPES_EXACT:
-            return stripped  # exact-case match - trust as typed
+            return stripped, True  # exact-case match - trust as typed
         known_ci = KNOWN_RELATION_TYPES_CI.get(stripped.lower())
         if known_ci:
-            return known_ci  # best-effort casing from a different context
+            return known_ci, True  # best-effort casing from a different context
         print(f"  [note] arrow label {label_text!r} is not a recognized "
-              f"relation type - falling back to default for "
+              f"relation type - using class-pair default for Type, label "
+              f"goes into Description instead for "
               f"({src_cls} -> {tgt_cls})", file=sys.stderr)
     if stroke_color in CONNECTOR_COLOR_OVERRIDE:
-        return CONNECTOR_COLOR_OVERRIDE[stroke_color]
+        return CONNECTOR_COLOR_OVERRIDE[stroke_color], False
     table = RELATION_RULES_CROSS_MODEL if cross_model else RELATION_RULES
-    return table.get((src_cls, tgt_cls), "Relation")
+    return table.get((src_cls, tgt_cls), "Relation"), False
 
 
 def extract_arrow_label(widget):
@@ -563,7 +579,7 @@ def build_intermodel_relations_by_source(cross_arrows):
         mural_start = entry["src"]   # Mural startRefId widget -> IREF target
         mural_end = entry["tgt"]     # Mural endRefId widget   -> record holder
         holder, pointed_at = mural_end, mural_start
-        rel_type = infer_relation_type(holder["cls"], pointed_at["cls"], entry["stroke"], cross_model=True, label_text=entry.get("label_text"))
+        rel_type, _ = infer_relation_type(holder["cls"], pointed_at["cls"], entry["stroke"], cross_model=True, label_text=entry.get("label_text"))
         row_xml = (
             f'<ROW id="row.{row_counter}" number="1">\n'
             f'<ATTRIBUTE name="Type" type="ENUMERATION">{rel_type}</ATTRIBUTE>\n'
@@ -615,7 +631,17 @@ def build_connectors_xml(same_model_arrows, start_index, con_counter):
         # as FROM/TO below (FROM=tgt, TO=src), not the raw Mural src/tgt -
         # otherwise the relation label (e.g. "Output" vs "Input") ends up
         # describing the opposite direction from the one actually stored.
-        rel_type = infer_relation_type(tgt["cls"], src["cls"], entry["stroke"], cross_model=False, label_text=entry.get("label_text"))
+        rel_type, label_used_as_type = infer_relation_type(
+            tgt["cls"], src["cls"], entry["stroke"], cross_model=False, label_text=entry.get("label_text")
+        )
+        # If the arrow had a label but it wasn't a recognized Type value,
+        # put it in Description instead of discarding it - confirmed by a
+        # real export where an Organizational Unit "part of" relation has
+        # an empty Type and "part of" living in Description.
+        label_text = entry.get("label_text")
+        description = ""
+        if label_text and not label_used_as_type:
+            description = label_text.strip()
         con_id = f"con.{con_counter}"
         # Empirically-confirmed swap: Mural start/end come out reversed vs 4EM FROM/TO.
         connectors_xml.append(
@@ -624,7 +650,7 @@ def build_connectors_xml(same_model_arrows, start_index, con_counter):
             f'<TO instance="{src["name"]}" class="{src["cls"]}"></TO>\n'
             f'<ATTRIBUTE name="Positions" type="STRING">EDGE 0 index:{index}</ATTRIBUTE>\n'
             f'<ATTRIBUTE name="Type" type="ENUMERATION">{rel_type}</ATTRIBUTE>\n'
-            f'<ATTRIBUTE name="Description" type="LONGSTRING"></ATTRIBUTE>\n'
+            f'<ATTRIBUTE name="Description" type="LONGSTRING">{description}</ATTRIBUTE>\n'
             f'<ATTRIBUTE name="IR" type="ENUMERATION">False</ATTRIBUTE>\n'
             f'</CONNECTOR>'
         )
